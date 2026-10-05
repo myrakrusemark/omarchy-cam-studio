@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Studio Cam (omarchy-cam-studio): an AI background-replacing virtual webcam.
+#   webcam -> matte.py (background matting) -> /dev/video11 -> OBS touch-ups -> /dev/video10 "Studio Cam"
+#   studio-cam          start in tray if stopped, quit if running
+#   studio-cam start    start (no-op if running)
+#   studio-cam quit     stop the whole pipeline
+#   studio-cam pause    toggle a frozen frame (webcam stays on)
+#   studio-cam loop     toggle motion pause: the last 30 s replayed back and forth
+#   studio-cam camoff   toggle a "Camera off" card (webcam released)
+#   studio-cam live     back to normal video
+#   studio-cam status   print off | starting | live | paused | loop | camoff | noobs (OBS not running)
+#   studio-cam res [360|480|720]  size video and mask are processed at (lower is faster, softer);
+#                       applies live. The stream itself is always 720p. No arg prints the setting
+#   studio-cam tune     open OBS visibly to adjust filters
+#
+# Settings live in ~/.config/studio-cam/: background.jpg or background.png replaces the
+# background (otherwise it is blurred); `resolution` holds the processing size.
+# Environment: STUDIO_CAM_CAMERA picks the webcam, STUDIO_CAM_ARGS adds matte.py options.
+APP_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+PYTHON="$APP_DIR/.venv/bin/python"
+CONFIG_DIR="$HOME/.config/studio-cam"
+RES_FILE="$CONFIG_DIR/resolution"   # read by matte.py at start and on SIGUSR1
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/studio-cam.log"
+if [ -n "$XDG_RUNTIME_DIR" ]; then STATE_DIR="$XDG_RUNTIME_DIR/studio-cam"; else STATE_DIR="/tmp/studio-cam-$UID"; fi  # as matte.py
+MODE_FILE="$STATE_DIR/mode"
+re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
+MATTE_PATTERN="^$(re_escape "$PYTHON $APP_DIR/matte.py") "   # only our matte.py, not an editor that has it open
+OBS_PATTERN="^obs --profile Studio Cam "                     # only the Studio Cam OBS, not one used for other things
+
+matte_pid() { pgrep -u "$UID" -of "$MATTE_PATTERN"; }
+obs_running() { pgrep -u "$UID" -f "$OBS_PATTERN" >/dev/null; }
+running() { obs_running || matte_pid >/dev/null; }
+# Start, quit and tune take a lock so overlapping clicks can't race each other.
+lock() { mkdir -p "$STATE_DIR"; exec 9>"$STATE_DIR/lock"; flock -w 15 9 || { notify "Busy, try again"; exit 1; }; }
+mode() { cat "$MODE_FILE" 2>/dev/null || echo live; }
+res() { r=$(cat "$RES_FILE" 2>/dev/null); case "$r" in 360|480|720) echo "$r" ;; *) echo 480 ;; esac; }
+notify() { notify-send -i camera-web "Studio Cam" "$1"; }
+
+camera() {
+  if [ -n "$STUDIO_CAM_CAMERA" ]; then echo "$STUDIO_CAM_CAMERA"; return; fi
+  local c; c=$(ls /dev/v4l/by-id/*-video-index0 2>/dev/null | head -1)
+  echo "${c:-/dev/video0}"
+}
+
+background() {
+  local f
+  for f in "$CONFIG_DIR"/background.{jpg,jpeg,png}; do
+    [ -f "$f" ] && { echo "$f"; return; }
+  done
+}
+
+set_mode() {
+  local pid; pid=$(matte_pid) || { notify "Not running"; exit 1; }
+  [ "$(cat "$STATE_DIR/pid" 2>/dev/null)" = "$pid" ] || { notify "Restart Studio Cam to enable pause"; exit 1; }
+  [ "$1" = loop ] && ! grep -qx "$pid loop" "$STATE_DIR/caps" 2>/dev/null && { notify "Restart Studio Cam to enable motion pause"; exit 1; }
+  local want=$1
+  [ "$want" != live ] && [ "$(mode)" = "$want" ] && want=live   # pause/camoff toggle
+  mkdir -p "$STATE_DIR"
+  echo "$want" >"$MODE_FILE"
+  kill -USR1 "$pid"
+}
+
+stop_obs() {  # stop the Studio Cam OBS and wait until it has exited
+  pkill -u "$UID" -f "$OBS_PATTERN" || return 0
+  for _ in $(seq 50); do obs_running || return 0; sleep 0.2; done
+  pkill -KILL -u "$UID" -f "$OBS_PATTERN"; sleep 0.5
+}
+
+quit() {
+  stop_obs
+  pkill -u "$UID" -f "$MATTE_PATTERN"
+  for _ in $(seq 25); do matte_pid >/dev/null || break; sleep 0.2; done
+  matte_pid >/dev/null && pkill -KILL -u "$UID" -f "$MATTE_PATTERN"
+  rm -f "$MODE_FILE" "$STATE_DIR/pid" "$STATE_DIR/caps"
+  notify "Stopped"
+}
+
+start_obs() {  # start_obs [visible]
+  local obs_args=(--profile "Studio Cam" --collection "Studio Cam" --startvirtualcam --disable-shutdown-check)
+  [ "$1" = visible ] || obs_args+=(--minimize-to-tray)
+  (cd / && setsid -f obs "${obs_args[@]}" >/dev/null 2>&1 9>&-)   # 9>&-: don't inherit the lock
+}
+
+start() {
+  if [ ! -e /dev/video10 ] || [ ! -e /dev/video11 ]; then
+    notify "The v4l2loopback devices are missing. Run install.sh or: sudo modprobe v4l2loopback"
+    exit 1
+  fi
+  [ -x "$PYTHON" ] || { notify "Not installed: run $APP_DIR/install.sh"; exit 1; }
+  mkdir -p "$STATE_DIR" "${LOG%/*}"
+  touch "$STATE_DIR/starting"
+  trap 'rm -f "$STATE_DIR/starting"' EXIT
+  if ! matte_pid >/dev/null; then
+    echo live >"$MODE_FILE"
+    local cam bg extra args=()
+    cam=$(camera)
+    v4l2-ctl -d "$cam" -c exposure_dynamic_framerate=0 2>/dev/null  # keep 30fps in dim light
+    bg=$(background)
+    [ -n "$bg" ] && args+=(--background "$bg")
+    read -ra extra <<<"$STUDIO_CAM_ARGS"
+    args+=("${extra[@]}")
+    (cd / && setsid -f "$PYTHON" "$APP_DIR/matte.py" --camera "$cam" "${args[@]}" >"$LOG" 2>&1 9>&-)
+  fi
+  if obs_running; then
+    if [ "$1" = tune ]; then stop_obs; start_obs visible; fi   # bring the tray-minimized OBS up
+    return
+  fi
+  sleep 3   # let matte.py claim /dev/video11 and set its format before OBS opens it
+  if ! matte_pid >/dev/null; then
+    notify "Failed to start: $(grep -v -i warn "$LOG" | tail -1)"
+    exit 1
+  fi
+  if [ "$1" = tune ]; then start_obs visible; else start_obs; fi
+  notify "Running — pick \"Studio Cam\" as your camera"
+}
+
+status() {
+  if ! matte_pid >/dev/null; then echo off
+  elif ! obs_running; then
+    if [ -n "$(find "$STATE_DIR/starting" -newermt '-30 seconds' 2>/dev/null)" ]; then echo starting; else echo noobs; fi
+  else mode; fi
+}
+
+set_res() {
+  case "$1" in 360|480|720) ;; *) echo "resolution must be 360, 480 or 720" >&2; exit 2 ;; esac
+  mkdir -p "$CONFIG_DIR"; echo "$1" >"$RES_FILE"
+  local w; case "$1" in 360) w=640 ;; 480) w=854 ;; 720) w=1280 ;; esac
+  [ -f "$APP_DIR/models/rvm_resnet50_fp16_${w}x${1}_ds0.25.onnx" ] ||
+    notify "No ${1}p model: run $APP_DIR/tools/build_models.py $1"
+  local pid; pid=$(matte_pid) || return 0
+  if grep -qx "$pid res" "$STATE_DIR/caps" 2>/dev/null; then
+    kill -USR1 "$pid"
+  else
+    notify "${1}p saved. Restart Studio Cam to use it"
+  fi
+}
+
+case "$1" in
+  "")      lock; if running; then quit; else start; fi ;;
+  start)   lock; start ;;
+  quit|stop) lock; if running; then quit; fi ;;
+  tune)    lock; start tune ;;
+  pause)   set_mode paused ;;
+  loop)    set_mode loop ;;
+  camoff)  set_mode camoff ;;
+  live)    set_mode live ;;
+  res)     if [ -n "$2" ]; then set_res "$2"; else res; fi ;;
+  status)  status ;;
+  state)   echo "$(status) $(res)" ;;   # one call for the bar widget's poll
+  *)       sed -n '2,18p' "$0"; exit 2 ;;
+esac

@@ -1,0 +1,11 @@
+# Runtime
+numpy>=2.0
+opencv-python-headless>=4.10
+onnxruntime>=1.22
+onnxruntime-ep-webgpu>=0.4   # GPU inference through WebGPU (Vulkan); CPU fallback without it
+pyvirtualcam>=0.12
+pillow>=10.1
+# Model build (tools/build_models.py)
+onnx>=1.16
+onnxsim>=0.4
+onnxconverter-common>=1.14

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Studio Cam
+Comment=Toggle the processed virtual webcam (background blur, touch-ups)
+Exec=studio-cam
+Icon=camera-web
+Type=Application
+Categories=AudioVideo;Video;
+Actions=tune;
+
+[Desktop Action tune]
+Name=Tune filters
+Exec=studio-cam tune

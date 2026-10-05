@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "studio-cam",
+  "name": "Studio Cam",
+  "version": "1.1.0",
+  "author": "omarchy-cam-studio",
+  "description": "Studio Cam virtual webcam: state icon plus a menu to pause, motion-pause, turn the camera off, set the processing resolution, start and quit (the studio-cam CLI)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Studio Cam",
+    "description": "Pause, camera off, resolution, start and quit for Studio Cam",
+    "category": "Video",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "license": "MIT"
+}
